@@ -1,0 +1,424 @@
+---
+title: "EEA-TP2"
+author: "Victoria Di Liscia"
+date: "2024-12-14"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Aplicacion del Algoritmo LARS para selección de Variables
+## Dataset rendimiento académico
+
+Carga Librerías
+```{r}
+library(readr)
+library(dplyr)
+library(corrplot)
+library(ggplot2)
+library(tidyr)
+library(lars)
+library(glmnet)
+library(kableExtra)
+```
+
+Seed:
+```{r}
+set.seed(3097)
+```
+
+Lectura datos:  
+
+```{r}
+student_data <- read.csv("student-mat.csv", sep = ";")
+head(student_data)
+
+num_variables <- ncol(student_data)  
+num_observaciones <- nrow(student_data)  
+
+cat("Cantidad de variables:", num_variables, "\n")
+cat("Cantidad de observaciones:", num_observaciones, "\n")
+```
+
+## Exploración del dataset
+
+Visualizamos la distribucion de las variables:
+
+```{r}
+hist(student_data$G3, breaks = 10, col = "lightblue", main = "Distribución de G3 (Nota Final)",
+     xlab = "G3", ylab = "Frecuencia")
+
+library(ggplot2)
+library(tidyr)
+student_data_long <- pivot_longer(student_data, cols = where(is.numeric))
+
+ggplot(student_data_long, aes(value)) +
+  geom_histogram(bins = 15, fill = "blue", color = "black") +
+  facet_wrap(~name, scales = "free_x") +
+  theme_minimal() +
+  labs(title = "Distribución de las Variables Numéricas")
+
+```
+## Correlación
+
+Visualizamos la correlación entre las variables numéricas.
+
+```{r}
+# Calcular la matriz de correlación
+cor_matrix <- cor(student_data[sapply(student_data, is.numeric)])
+
+# Heatmap de correlación
+corrplot(cor_matrix, method = "color", type = "upper", 
+         tl.cex = 0.5,  
+         number.cex = 0.5, 
+         title = "Heatmap de Correlación", addCoef.col = "black")
+```
+
+# Setup base
+
+las variables categoricas se pasan a variables dummy. 
+Para la regularización, se centran las variables explicativas para evitar que las distintas escalas puedan influenciar en la selección de variables.
+
+Se va a dividir en train y test para luego evaluar los modelos resultantes.
+
+```{r}
+student_data_dummy <- model.matrix(~ . - 1, data = student_data)
+
+X <- as.matrix(student_data_dummy[, -which(colnames(student_data_dummy) == "G3")])
+y <- as.numeric(student_data$G3)  # Nota final como variable continua
+
+X <- scale(X)
+test_size <- 0.2
+n <- nrow(student_data)
+
+test_indices <- sample(1:n, size = floor(test_size * n))
+
+# Separar los datos de entrenamiento y test
+X_train <- X[-test_indices, ]
+y_train <- y[-test_indices]
+
+X_test <- X[test_indices, ]
+y_test <- y[test_indices]
+
+# Verificar las dimensiones de los conjuntos
+cat("Tamaño de datos de entrenamiento:", nrow(X_train), "\n")
+cat("Tamaño de datos de test:", nrow(X_test), "\n")
+```
+
+
+## Aplicación LARS con LASSO
+
+```{r lars_lasso}
+lars_lasso_fit <- glmnet(X_train, y_train, alpha = 1, standardize = TRUE)
+
+# Validación cruzada con early stop
+lars_lasso_cv <- cv.glmnet(X_train, y_train, alpha = 1, nfolds = 10, type.measure = "mse", standardize = TRUE)
+
+coef_lars_lasso <- coef(lars_lasso_fit, s = lars_lasso_cv$lambda.min)
+
+# Mejor valor de lambda para LARS-LASSO
+best_lambda_lasso <- lars_lasso_cv$lambda.min
+cat("Mejor lambda LARS Lasso:", best_lambda_lasso, "\n")
+
+# Variables seleccionadas
+selected_variables_lars_lasso <- rownames(coef_lars_lasso)[which(coef_lars_lasso != 0)]
+cat("Coeficientes seleccionados LARS Lasso:", selected_variables_lars_lasso, "\n")
+cat("Número de coeficientes seleccionados LARS Lasso:", length(selected_variables_lars_lasso), "\n")
+
+print(coef_lars_lasso)
+```
+
+## Aplicación LARS con Elastic Net
+
+Se aplica el algoritmo LARS
+
+```{r lars_basic}
+# Usar Elastic Net (combinación de Lasso y Ridge) con LARS
+lars_elasticnet_fit <- glmnet(X_train, y_train, alpha = 0.5, standardize = TRUE)
+
+# Validación cruzada con early stop basada en MSE
+lars_elasticnet_cv <- cv.glmnet(X_train, y_train, alpha = 0.5, nfolds = 10, type.measure = "mse", standardize = TRUE)
+
+coef_lars_elasticnet <- coef(lars_elasticnet_fit, s = lars_elasticnet_cv$lambda.min)
+
+# Mejor valor de lambda para Elastic Net
+best_lambda_elasticnet <- lars_elasticnet_cv$lambda.min
+cat("Mejor lambda LARS Elastic Net:", best_lambda_elasticnet, "\n")
+
+# Variables seleccionadas
+selected_variables_lars_elasticnet <- rownames(coef_lars_elasticnet)[which(coef_lars_elasticnet != 0)]
+cat("Coeficientes seleccionados LARS Elasticnet:", selected_variables_lars_elasticnet, "\n")
+cat("Número de coeficientes seleccionados LARS Elasticnet:", length(selected_variables_lars_elasticnet), "\n")
+
+print(selected_variables_lars_elasticnet)
+
+print(coef_lars_elasticnet)
+
+```
+
+
+
+## Comparativas
+
+Se puede comparar la evolución del MSE segun se agregan variables en cada uno de los modelos:
+
+
+```{r lars_compare}
+
+get_selected_vars <- function(model_fit, lambda_values) {
+  num_selected <- sapply(lambda_values, function(lambda) {
+    coef_values <- coef(model_fit, s = lambda)
+    sum(coef_values != 0)  # Cuenta los coeficientes no nulos
+  })
+  return(num_selected)
+}
+
+# Obtener valores de lambda para cada modelo
+lambda_lasso <- lars_lasso_cv$lambda  
+lambda_elasticnet <- lars_elasticnet_cv$lambda 
+
+# Obtener valores de MSE
+lars_lasso_mse <- lars_lasso_cv$cvm
+lars_elasticnet_mse <- lars_elasticnet_cv$cvm
+
+# Variables Seleccionadas
+lars_lasso_vars <- get_selected_vars(lars_lasso_fit, lambda_lasso)
+lars_elasticnet_vars <- get_selected_vars(lars_elasticnet_fit, lambda_elasticnet)
+
+# Crear el dataframe con los resultados
+df <- data.frame(
+  lambda = c(lambda_lasso, lambda_elasticnet),
+  mse = c(lars_lasso_mse, lars_elasticnet_mse),
+  selected_vars = c(lars_lasso_vars, lars_elasticnet_vars),
+  model = rep(c("LARS Lasso", "LARS Elasticnet"), 
+              times = c(length(lambda_lasso), length(lambda_elasticnet)))
+)
+
+# Ver dataframe:
+df %>%
+  head(200) %>% 
+  kbl() %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed", "responsive")) %>%
+  scroll_box(width = "100%", height = "500px") 
+```
+
+
+```{r lars_graficos}
+
+max_vars <- 30
+
+# Filtrar el dataframe para cada modelo
+lars_lasso_filtered <- df[df$model == "LARS Lasso" & df$selected_vars <= max_vars, ]
+lars_elasticnet_filtered <- df[df$model == "LARS Elasticnet" & df$selected_vars <= max_vars, ]
+
+# Crear los gráficos separados
+
+# LARS Lasso
+ggplot(lars_lasso_filtered, aes(x = selected_vars, y = mse)) +
+  geom_line(color = "blue") +
+  geom_point(color = "blue") +
+  labs(
+    title = "LARS Lasso: Evolución de MSE con el número de variables seleccionadas",
+    x = "Número de Variables Seleccionadas",
+    y = "MSE"
+  ) +
+  theme_minimal()
+
+# LARS ElasticNet
+ggplot(lars_elasticnet_filtered, aes(x = selected_vars, y = mse)) +
+  geom_line(color = "red") +
+  geom_point(color = "red") +
+  labs(
+    title = "LARS Elasticnet: Evolución de MSE con el número de variables seleccionadas",
+    x = "Número de Variables Seleccionadas",
+    y = "MSE"
+  ) +
+  theme_minimal()
+
+
+
+```
+
+## Se vuelve a hacer el analisis pero eliminando G1 y G2 para ver que ocurre
+
+
+## Aplicación LARS-Lasso eliminando variables G1 y G2
+
+```{r lars_filtrado}
+
+X_train_filtered <- X_train[, !(colnames(X) %in% c("G1", "G2"))]
+X_test_filtered <- X_test[, !(colnames(X) %in% c("G1", "G2"))]
+
+# LARS base (modelo estándar) eliminando G1 y G2
+lars_lasso_filtrado_fit <- cv.glmnet(X_train_filtered, y_train, alpha = 1, nfolds = 10, type.measure = "mse", standardize = TRUE)
+
+# Mejor valor de lambda
+best_lambda_lasso_filtrado <- lars_lasso_filtrado_fit$lambda.min
+cat("Mejor lambda LARS lasso:", best_lambda_lasso_filtrado, "\n")
+
+# Coeficientes seleccionados
+coef_lasso_filtrado <- coef(lars_lasso_filtrado_fit, s = "lambda.min")
+selected_variables_lasso_filtrado <- rownames(coef_lasso_filtrado)[which(coef_lasso_filtrado != 0)]
+cat("Coeficientes seleccionados LARS base eliminando G1 y G2:", selected_variables_lasso_filtrado, "\n")
+cat("Número de coeficientes seleccionados LARS base eliminando G1 y G2:", length(selected_variables_lasso_filtrado), "\n")
+
+
+print(coef_lasso_filtrado)
+```
+
+## Aplicación LARS-Elasticnet eliminando variables G1 y G2
+
+```{r lars_elasticnet_filtrado}
+
+X_train_filtered <- X_train[, !(colnames(X) %in% c("G1", "G2"))]
+X_test_filtered <- X_test[, !(colnames(X) %in% c("G1", "G2"))]
+
+# LARS base (modelo estándar) eliminando G1 y G2
+lars_elasticnet_filtrado_fit <- cv.glmnet(X_train_filtered, y_train, alpha = 0.5, nfolds = 10, type.measure = "mse", standardize = TRUE)
+
+# Mejor valor de lambda
+best_lambda_elasticnet_filtrado <- lars_elasticnet_filtrado_fit$lambda.min
+cat("Mejor lambda LARS básico:", best_lambda_elasticnet_filtrado, "\n")
+
+# Coeficientes seleccionados
+coef_elasticnet_filtrado <- coef(lars_elasticnet_filtrado_fit, s = "lambda.min")
+selected_variables_elasticnet_filtrado <- rownames(coef_elasticnet_filtrado)[which(coef_elasticnet_filtrado != 0)]
+cat("Coeficientes seleccionados LARS base eliminando G1 y G2:", selected_variables_elasticnet_filtrado, "\n")
+cat("Número de coeficientes seleccionados LARS base eliminando G1 y G2:", length(selected_variables_elasticnet_filtrado), "\n")
+
+
+print(coef_elasticnet_filtrado)
+```
+
+
+## Comparativas Filtrado
+
+Se puede comparar la evolución del MSE segun se agregan variables en cada uno de los modelos:
+
+
+```{r lars_filtrado_compare}
+
+get_selected_vars <- function(model_fit, lambda_values) {
+  num_selected <- sapply(lambda_values, function(lambda) {
+    coef_values <- coef(model_fit, s = lambda)
+    sum(coef_values != 0)  # Cuenta los coeficientes no nulos
+  })
+  return(num_selected)
+}
+
+# Obtener valores de lambda para cada modelo
+lambda_lasso_filtrado <- lars_lasso_filtrado_fit$lambda  
+lambda_elasticnet_filtrado <- lars_elasticnet_filtrado_fit$lambda 
+
+# Obtener valores de MSE
+lars_lasso_filtrado_mse <- lars_lasso_filtrado_fit$cvm
+lars_elasticnet_filtrado_mse <- lars_elasticnet_filtrado_fit$cvm
+
+# Variables Seleccionadas
+lars_lasso_filtrado_vars <- get_selected_vars(lars_lasso_filtrado_fit, lambda_lasso_filtrado)
+lars_elasticnet_filtrado_vars <- get_selected_vars(lars_elasticnet_filtrado_fit, lambda_elasticnet_filtrado)
+
+# Crear el dataframe con los resultados
+df_filtrado <- data.frame(
+  lambda = c(lambda_lasso_filtrado, lambda_elasticnet_filtrado),
+  mse = c(lars_lasso_filtrado_mse, lars_elasticnet_filtrado_mse),
+  selected_vars = c(lars_lasso_filtrado_vars, lars_elasticnet_filtrado_vars),
+  model = rep(c("LARS Lasso Filtrado", "LARS Elasticnet Filtrado"), 
+              times = c(length(lambda_lasso_filtrado), length(lambda_elasticnet_filtrado)))
+)
+
+# Ver dataframe:
+df_filtrado %>%
+  head(200) %>% 
+  kbl() %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed", "responsive")) %>%
+  scroll_box(width = "100%", height = "500px") 
+```
+
+
+```{r lars_filtrado_graficos}
+
+max_vars <- 13
+
+# Filtrar el dataframe para cada modelo
+lars_lasso_filtrado_filtered <- df_filtrado[df_filtrado$model == "LARS Lasso Filtrado" & df$selected_vars <= max_vars, ]
+lars_elasticnet_filtrado_filtered <- df_filtrado[df_filtrado$model == "LARS Elasticnet Filtrado" & df$selected_vars <= max_vars, ]
+
+# Crear los gráficos separados
+
+# LARS Lasso
+ggplot(lars_lasso_filtrado_filtered, aes(x = selected_vars, y = mse)) +
+  geom_line(color = "blue") +
+  geom_point(color = "blue") +
+  labs(
+    title = "LARS Lasso: Evolución de MSE con el número de variables seleccionadas",
+    x = "Número de Variables Seleccionadas",
+    y = "MSE"
+  ) +
+  theme_minimal()
+
+# LARS ElasticNet
+ggplot(lars_elasticnet_filtrado_filtered, aes(x = selected_vars, y = mse)) +
+  geom_line(color = "red") +
+  geom_point(color = "red") +
+  labs(
+    title = "LARS Elasricnet: Evolución de MSE con el número de variables seleccionadas",
+    x = "Número de Variables Seleccionadas",
+    y = "MSE"
+  ) +
+  theme_minimal()
+
+
+
+```
+
+# Comparacion utilizando test
+
+Se calculan metricas para cada modelo utilizando test.
+
+```{r test}
+
+# Calcular las métricas de desempeño para cada modelo
+calculate_metrics <- function(model, X_test, y_test) {
+  # Hacer predicciones
+  
+  y_pred <- predict(model, X_test, s = model$lambda.min)  # Usamos lambda.min si es el modelo cv.glmnet
+  
+  # MSE
+  mse <- mean((y_pred - y_test)^2)
+  
+  # RMSE
+  rmse <- sqrt(mse)
+  
+  # MAE
+  mae <- mean(abs(y_pred - y_test))
+  
+  # R²
+  ss_total <- sum((y_test - mean(y_test))^2)
+  ss_residual <- sum((y_test - y_pred)^2)
+  r_squared <- 1 - (ss_residual / ss_total)
+  
+  # Devolver las métricas
+  return(c(MSE = mse, RMSE = rmse, MAE = mae, R2 = r_squared))
+}
+
+# Calcular las métricas para cada modelo
+metrics_lars_elasticnet <- calculate_metrics(lars_elasticnet_fit, X_test, y_test)
+metrics_lars_lasso <- calculate_metrics(lars_lasso_fit, X_test, y_test)
+metrics_lars_lasso_filtrado <- calculate_metrics(lars_lasso_filtrado_fit, X_test_filtered, y_test)
+metrics_lars_elasticnet_filtrado <- calculate_metrics(lars_elasticnet_filtrado_fit, X_test_filtered, y_test)
+
+# Crear un dataframe con los resultados
+metrics_df <- data.frame(
+  Model = c("LARS Lasso", "LARS Elasticnet", "LARS Lasso Filtrado", "LARS Elasticnet Filtrado"),
+  MSE = c(metrics_lars_lasso["MSE"], metrics_lars_elasticnet["MSE"], metrics_lars_lasso_filtrado["MSE"], metrics_lars_elasticnet_filtrado["MSE"]),
+  RMSE = c(metrics_lars_lasso["RMSE"], metrics_lars_elasticnet["RMSE"], metrics_lars_lasso_filtrado["RMSE"], metrics_lars_elasticnet_filtrado["RMSE"]),
+  MAE = c(metrics_lars_lasso["MAE"], metrics_lars_elasticnet["MAE"],metrics_lars_lasso_filtrado["MAE"], metrics_lars_elasticnet_filtrado["MAE"]),
+  R2 = c(metrics_lars_lasso["R2"], metrics_lars_elasticnet["R2"],metrics_lars_lasso_filtrado["R2"], metrics_lars_elasticnet_filtrado["R2"])
+)
+
+# Mostrar la tabla con kable
+kable(metrics_df, caption = "Comparación de Modelos LARS en Términos de MSE, RMSE, MAE y R²", format = "markdown")
+```
